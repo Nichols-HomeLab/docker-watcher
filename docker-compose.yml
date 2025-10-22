@@ -1,0 +1,24 @@
+services:
+  docker-watcher:
+    build: .
+    container_name: docker-watcher
+    restart: unless-stopped
+    environment:
+      SMTP_HOST: "mail"                # change to your SMTP relay
+      SMTP_PORT: "25"
+      SMTP_FROM: "docker-watcher@yourdomain"
+      SMTP_TO: "ops@yourdomain"        # comma-separated for multiple
+      SMTP_TLS: "0"
+      # SMTP_USER: ""
+      # SMTP_PASS: ""
+      RESTARTS_IN_WINDOW: "3"
+      RESTART_WINDOW_SEC: "60"
+      BACKOFF_BASE_SEC: "60"
+      BACKOFF_MAX_SEC: "1800"
+      INCLUDE_RECOVERY: "1"
+      INCLUDE_IMAGE: "1"
+      CHECK_PING_EVERY: "10"
+      WATCHER_HOSTNAME: "${HOSTNAME:-lab-host}"
+      TZ: "America/New_York"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
