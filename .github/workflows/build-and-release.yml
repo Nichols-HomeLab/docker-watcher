@@ -5,16 +5,11 @@ on:
     branches: [ main ]
 
 permissions:
-  contents: write         # needed to create the release
-  packages: write         # needed to push to GHCR
+  contents: write
+  packages: write
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}   # e.g. owner/repo
-
-concurrency:
-  group: build-main
-  cancel-in-progress: false
 
 jobs:
   build-and-release:
@@ -24,17 +19,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Compute image repo (lowercase, org-pinned)
+        id: img
+        run: |
+          echo "OWNER_LC=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          echo "NAME_LC=$(basename '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          echo "IMAGE_REPO=${{ env.REGISTRY }}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/$(basename '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Set version
         id: version
         run: |
           echo "VERSION=v0.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
           echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
 
-      - name: Set up QEMU (multi-arch optional)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -47,7 +46,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.img.outputs.IMAGE_REPO }}
           tags: |
             type=raw,value=latest
             type=raw,value=${{ steps.version.outputs.SHORT_SHA }}
@@ -65,6 +64,44 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      # --- NEW: auto-publicize the GHCR package ---
+      - name: Make GHCR package public (org or user)
+        env:
+          ORG: ${{ steps.img.outputs.OWNER_LC }}
+          PKG: ${{ steps.img.outputs.NAME_LC }}
+          GH_TOKEN: ${{ secrets.GHCR_PUBLISH_PAT }}
+        run: |
+          set -euo pipefail
+
+          make_public_org() {
+            echo "Trying org package: ${ORG}/${PKG}"
+            gh api \
+              --method PUT \
+              -H "Accept: application/vnd.github+json" \
+              "/orgs/${ORG}/packages/container/${PKG}/visibility" \
+              -f visibility=public
+          }
+
+          make_public_user() {
+            # fall back to actor namespace (lowercased)
+            USER_LC="$(echo '${{ github.actor }}' | tr '[:upper:]' '[:lower:]')"
+            echo "Trying user package: ${USER_LC}/${PKG}"
+            gh api \
+              --method PUT \
+              -H "Accept: application/vnd.github+json" \
+              "/users/${USER_LC}/packages/container/${PKG}/visibility" \
+              -f visibility=public
+          }
+
+          # org first; if it fails (e.g., not found), try user
+          if make_public_org; then
+            echo "✔ Package public under org ${ORG}/${PKG}"
+          else
+            echo "Org visibility change failed, trying user namespace…"
+            make_public_user
+            echo "✔ Package public under user namespace"
+          fi
+
       - name: Create GitHub Release
         uses: actions/create-release@v1
         env:
@@ -76,10 +113,8 @@ jobs:
             Automated release for commit `${{ steps.version.outputs.SHORT_SHA }}`.
 
             **Images:**
-            - `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest`
-            - `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.SHORT_SHA }}`
-            - `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}`
-
-            Built on: ${{ github.workflow }} (run #${{ github.run_number }})
+            - `${{ steps.img.outputs.IMAGE_REPO }}:latest`
+            - `${{ steps.img.outputs.IMAGE_REPO }}:${{ steps.version.outputs.SHORT_SHA }}`
+            - `${{ steps.img.outputs.IMAGE_REPO }}:${{ steps.version.outputs.VERSION }}`
           draft: false
           prerelease: false
