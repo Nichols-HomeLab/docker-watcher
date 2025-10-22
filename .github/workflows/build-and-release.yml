@@ -57,7 +57,7 @@ jobs:
       # Bump SemVer as a pre-release on dev (e.g., v1.4.0-dev.3)
       - name: Bump version (pre-release)
         id: bump
-        uses: anothrNick/github-tag-action@1.67.0
+        uses: anothrNick/github-tag-action@1.75.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WITH_V: true
@@ -136,7 +136,7 @@ jobs:
       # Bump SemVer on main using Conventional Commits (creates vX.Y.Z)
       - name: Bump version (stable)
         id: bump
-        uses: anothrNick/github-tag-action@1.67.0
+        uses: anothrNick/github-tag-action@1.75.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WITH_V: true
