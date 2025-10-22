@@ -3,6 +3,7 @@ name: Build image & create release (main)
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -63,44 +64,76 @@ jobs:
           cache-to: type=gha,mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
-      # --- NEW: auto-publicize the GHCR package ---
-      - name: Make GHCR package public (org or user)
+          
+      - name: Make GHCR package public (curl, org→user fallback, with retries)
         env:
-          ORG: ${{ steps.img.outputs.OWNER_LC }}
-          PKG: ${{ steps.img.outputs.NAME_LC }}
-          GH_TOKEN: ${{ secrets.GHCR_PUBLISH_PAT }}
+          REGISTRY: ghcr.io
+          OWNER_LC: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          GHCR_PUBLISH_PAT: ${{ secrets.GHCR_PUBLISH_PAT }}
         run: |
           set -euo pipefail
+          OWNER_LC="$(echo "${OWNER_LC}" | tr '[:upper:]' '[:lower:]')"
+          PKG="$(echo "${REPO_NAME}" | tr '[:upper:]' '[:lower:]')"
+          USER_LC="$(echo "${GITHUB_ACTOR}" | tr '[:upper:]' '[:lower:]')"
 
-          make_public_org() {
-            echo "Trying org package: ${ORG}/${PKG}"
-            gh api \
-              --method PUT \
-              -H "Accept: application/vnd.github+json" \
-              "/orgs/${ORG}/packages/container/${PKG}/visibility" \
-              -f visibility=public
+          auth_header="Authorization: Bearer ${GHCR_PUBLISH_PAT}"
+          accept_header="Accept: application/vnd.github+json"
+
+          # helper: check if package exists under org/user
+          pkg_exists() {
+            local scope="$1"  # org|user
+            if [ "$scope" = "org" ]; then
+              curl -fsS -H "$accept_header" -H "$auth_header" \
+                "https://api.github.com/orgs/${OWNER_LC}/packages/container/${PKG}" >/dev/null
+            else
+              curl -fsS -H "$accept_header" -H "$auth_header" \
+                "https://api.github.com/users/${USER_LC}/packages/container/${PKG}" >/dev/null
+            fi
           }
 
-          make_public_user() {
-            # fall back to actor namespace (lowercased)
-            USER_LC="$(echo '${{ github.actor }}' | tr '[:upper:]' '[:lower:]')"
-            echo "Trying user package: ${USER_LC}/${PKG}"
-            gh api \
-              --method PUT \
-              -H "Accept: application/vnd.github+json" \
-              "/users/${USER_LC}/packages/container/${PKG}/visibility" \
-              -f visibility=public
+          # helper: set visibility public under org/user
+          make_public() {
+            local scope="$1"  # org|user
+            local url
+            if [ "$scope" = "org" ]; then
+              url="https://api.github.com/orgs/${OWNER_LC}/packages/container/${PKG}/visibility"
+            else
+              url="https://api.github.com/users/${USER_LC}/packages/container/${PKG}/visibility"
+            fi
+            curl -fsS -X PUT -H "$accept_header" -H "$auth_header" \
+              -d '{"visibility":"public"}' "$url" >/dev/null
           }
 
-          # org first; if it fails (e.g., not found), try user
-          if make_public_org; then
-            echo "✔ Package public under org ${ORG}/${PKG}"
+          # wait (briefly) for GHCR to register the freshly pushed package
+          tries=0
+          max_tries=15   # ~30s total
+          until pkg_exists org || pkg_exists user; do
+            tries=$((tries+1))
+            if [ $tries -ge $max_tries ]; then
+              echo "Package ${PKG} not yet visible under org '${OWNER_LC}' or user '${USER_LC}' after waiting. Failing."
+              exit 1
+            fi
+            echo "Package not found yet; retrying (${tries}/${max_tries})..."
+            sleep 2
+          done
+
+          # attempt org first; if not there, try user
+          if pkg_exists org; then
+            echo "Found package under org '${OWNER_LC}/${PKG}'. Making public…"
+            make_public org
+            echo "✔ Package is now public under org."
+          elif pkg_exists user; then
+            echo "Found package under user '${USER_LC}/${PKG}'. Making public…"
+            make_public user
+            echo "✔ Package is now public under user."
           else
-            echo "Org visibility change failed, trying user namespace…"
-            make_public_user
-            echo "✔ Package public under user namespace"
+            echo "Unexpected: package disappeared between checks."
+            exit 1
           fi
+
+
+
 
       - name: Create GitHub Release
         uses: actions/create-release@v1

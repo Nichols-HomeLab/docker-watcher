@@ -44,6 +44,18 @@ docker run -d --name docker-watcher \
   docker-watcher
 ```
 
+### Prebuilt image (GHCR)
+
+`main` pushes trigger the [`build-and-release`](.github/workflows/build-and-release.yml) workflow, which publishes a multi-arch image to GHCR and makes the package public.
+
+```bash
+docker pull ghcr.io/<owner>/<repo>:latest
+docker pull ghcr.io/<owner>/<repo>:<short-sha>
+docker pull ghcr.io/<owner>/<repo>:vX.Y.Z
+```
+
+Replace `<owner>/<repo>` with the lowercase GitHub namespace and repository name (for example, `ghcr.io/nichols-homelab/docker-watcher`).
+
 Or with Compose:
 
 ```yaml
