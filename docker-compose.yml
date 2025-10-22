@@ -16,8 +16,8 @@ services:
       BACKOFF_BASE_SEC: "60"
       BACKOFF_MAX_SEC: "1800"
       INCLUDE_RECOVERY: "1"
-      INCLUDE_IMAGE: "1"
       CHECK_PING_EVERY: "10"
+      MAX_LOOP_ALERTS: "3"
       WATCHER_HOSTNAME: "${HOSTNAME:-lab-host}"
       TZ: "America/New_York"
     volumes:

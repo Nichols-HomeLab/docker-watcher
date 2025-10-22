@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
-docker-watcher: Monitor Docker for down / restart-looping containers and notify via SMTP.
-
-Features
-- Listens to Docker events (start, stop, die, oom) via docker SDK.
-- Sends a notification when a container transitions from running to down.
-- Detects restart loops (>= N restarts within T seconds) and sends a single notification.
-- Exponential backoff per container to avoid spamming if a container keeps flapping.
-- Optional notifications for recovery (container back UP) and for Docker daemon up/down.
-- Configurable exclusively via environment variables.
-
-Run it in a container with the Docker socket mounted read-only:
-  -v /var/run/docker.sock:/var/run/docker.sock:ro
+docker-watcher
+- DOWN_GRACE_SEC (default 60s): wait this long after exit before "down".
+- CHECK_PING_EVERY default 60s.
+- No image tag in names.
+- Terse SMTP messages (e.g., "Gitea container is down at ...").
+- Exponential backoff for alerts.
+- NEW: MAX_LOOP_ALERTS (default 3): stop loop alerts after N until recovery.
 """
 
 import os
@@ -44,13 +39,17 @@ RESTART_WINDOW_SEC  = int(ENV("RESTART_WINDOW_SEC", "60"))
 BACKOFF_BASE_SEC    = int(ENV("BACKOFF_BASE_SEC", "60"))
 BACKOFF_MAX_SEC     = int(ENV("BACKOFF_MAX_SEC", "3600"))
 
+# Loop alert suppression cap
+MAX_LOOP_ALERTS     = int(ENV("MAX_LOOP_ALERTS", "3"))
+
 # General behavior
 INCLUDE_RECOVERY    = ENV("INCLUDE_RECOVERY", "1") in ("1", "true", "True", "yes", "on")
-INCLUDE_IMAGE       = ENV("INCLUDE_IMAGE", "1") in ("1", "true", "True", "yes", "on")
-CHECK_PING_EVERY    = int(ENV("CHECK_PING_EVERY", "10"))     # seconds
-TZ_STR              = ENV("TZ", "UTC")
 
-# Human-friendly hostname in messages
+# Ping cadence & down grace
+CHECK_PING_EVERY    = int(ENV("CHECK_PING_EVERY", "60"))     # default 60s
+DOWN_GRACE_SEC      = int(ENV("DOWN_GRACE_SEC", "60"))       # default 60s
+
+TZ_STR              = ENV("TZ", "UTC")
 HOSTNAME            = ENV("WATCHER_HOSTNAME", socket.gethostname())
 
 def now_utc():
@@ -58,7 +57,6 @@ def now_utc():
 
 def fmt_ts(dt: datetime) -> str:
     try:
-        # Present in the configured timezone for readability
         import pytz  # optional
         tz = pytz.timezone(TZ_STR)
         return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -87,29 +85,34 @@ def short_id(cid: str) -> str:
     return cid[:12] if cid else ""
 
 def container_display_name(container):
-    name = (container.name or "").lstrip("/")
-    img = (getattr(container, "image", None).tags or ["<none>"])[0] if INCLUDE_IMAGE else None
-    if INCLUDE_IMAGE and img:
-        return f"{name} ({img})"
-    return name
+    # Only the container name; no image/tag.
+    return (container.name or "").lstrip("/")
 
 class Notifier:
     def __init__(self):
         self.client = docker.from_env()
         self.low_client = self.client.api
 
-        # Track last known running/exited state
-        self.container_state = {}  # id -> "running"|"exited"|None
+        # id -> "running"|"exited"
+        self.container_state = {}
 
-        # restart tracking: container_id -> deque(timestamps of 'die' events within window)
+        # loop detection
         self.restarts = defaultdict(lambda: deque(maxlen=64))
 
-        # per-container alert backoff (mute) state
+        # backoff/mute
         self.mute_until = defaultdict(lambda: datetime.min.replace(tzinfo=timezone.utc))
-        self.backoff_level = defaultdict(int)  # doubles delay each time: base * 2^level
+        self.backoff_level = defaultdict(int)
 
-        # Docker daemon reachability
-        self.docker_up = None  # unknown at start
+        # down grace + single-down alert
+        self.down_since = {}          # id -> first seen exited at
+        self.down_alerted = set()     # ids already down-alerted until recovery
+
+        # loop alert capping
+        self.loop_alerts_sent = defaultdict(int)  # id -> count of loop alerts sent
+        self.loop_alerts_suppressed = set()       # ids suppressed until recovery
+
+        # docker daemon state
+        self.docker_up = None
 
     def _in_backoff(self, cid: str) -> bool:
         return now_utc() < self.mute_until[cid]
@@ -130,95 +133,102 @@ class Notifier:
         except Exception as e:
             log(f"ERROR sending email: {e}")
 
-    def _notify_down(self, container, event: dict):
+    def _notify_down(self, container):
         cid = container.id
         if self._in_backoff(cid):
             log(f"Muted DOWN alert for {container_display_name(container)} (backoff active)")
             return
-        display = container_display_name(container)
-        reason = event.get("Reason") or event.get("status") or "down"
-        exit_code = None
-        try:
-            exit_code = container.wait(timeout=0.1).get("StatusCode")
-        except Exception:
-            pass
-        subject = f"[Docker Watcher] DOWN: {display} on {HOSTNAME}"
-        body = (
-            f"Host: {HOSTNAME}\n"
-            f"Container: {display}\n"
-            f"ID: {short_id(cid)}\n"
-            f"At: {fmt_ts(now_utc())}\n"
-            f"Event: {reason}\n"
-            + (f"Exit code: {exit_code}\n" if exit_code is not None else "")
-        )
+        name = container_display_name(container)
+        ts = fmt_ts(now_utc())
+        subject = f"{name} container is down at {ts}"
+        body = f"{name} container is down at {ts} on {HOSTNAME}."
         self._notify_once(subject, body)
         self._bump_backoff(cid)
+        self.down_alerted.add(cid)
 
     def _notify_loop(self, container, count: int, window_sec: int):
         cid = container.id
+
+        # Respect hard cap
+        if cid in self.loop_alerts_suppressed:
+            log(f"Loop alerts suppressed for {container_display_name(container)} (max reached)")
+            return
+        if self.loop_alerts_sent[cid] >= MAX_LOOP_ALERTS:
+            self.loop_alerts_suppressed.add(cid)
+            log(f"Reached MAX_LOOP_ALERTS={MAX_LOOP_ALERTS} for {container_display_name(container)}; suppressing until recovery")
+            return
+
         if self._in_backoff(cid):
             log(f"Muted LOOP alert for {container_display_name(container)} (backoff active)")
             return
-        display = container_display_name(container)
-        subject = f"[Docker Watcher] RESTART LOOP: {display} on {HOSTNAME}"
+
+        name = container_display_name(container)
+        ts = fmt_ts(now_utc())
+        subject = f"{name} is restarting frequently ({count} times ~{window_sec}s) at {ts}"
         body = (
-            f"Host: {HOSTNAME}\n"
-            f"Container: {display}\n"
-            f"ID: {short_id(cid)}\n"
-            f"At: {fmt_ts(now_utc())}\n"
-            f"Detected: {count} restarts within ~{window_sec}s\n"
-            f"Action: Suppressing further alerts with exponential backoff.\n"
+            f"{name} is restarting frequently ({count} restarts within ~{window_sec}s) at {ts} on {HOSTNAME}.\n"
+            f"Further alerts will use exponential backoff and stop entirely after {MAX_LOOP_ALERTS} loop alerts until recovery."
         )
         self._notify_once(subject, body)
         self._bump_backoff(cid)
+        self.loop_alerts_sent[cid] += 1
+
+        # If this send hit the cap, mark suppressed for any subsequent attempts
+        if self.loop_alerts_sent[cid] >= MAX_LOOP_ALERTS:
+            self.loop_alerts_suppressed.add(cid)
 
     def _notify_up(self, container):
         cid = container.id
-        display = container_display_name(container)
-        subject = f"[Docker Watcher] UP: {display} on {HOSTNAME}"
-        body = (
-            f"Host: {HOSTNAME}\n"
-            f"Container: {display}\n"
-            f"ID: {short_id(cid)}\n"
-            f"At: {fmt_ts(now_utc())}\n"
-            f"Event: Container is running again.\n"
-        )
+        name = container_display_name(container)
+        ts = fmt_ts(now_utc())
+        subject = f"{name} container is back up at {ts}"
+        body = f"{name} container is back up at {ts} on {HOSTNAME}."
         self._notify_once(subject, body)
-        # Reset backoff after a healthy run
+        # Reset all suppression/backoff on recovery
         self._reset_backoff(cid)
+        self.down_since.pop(cid, None)
+        self.down_alerted.discard(cid)
+        self.loop_alerts_sent[cid] = 0
+        self.loop_alerts_suppressed.discard(cid)
 
     def _notify_docker_state(self, up: bool):
         state = "UP" if up else "DOWN"
-        subject = f"[Docker Watcher] DOCKER {state} on {HOSTNAME}"
-        body = (
-            f"Host: {HOSTNAME}\n"
-            f"Docker daemon is {state.lower()} at {fmt_ts(now_utc())}.\n"
-        )
+        subject = f"Docker daemon is {state.lower()} at {fmt_ts(now_utc())}"
+        body = f"Docker daemon is {state.lower()} on {HOSTNAME} at {fmt_ts(now_utc())}."
         self._notify_once(subject, body)
 
     def _seed_states(self):
-        # Initialize known states so we don't spam on startup
         for c in self.client.containers.list(all=True):
             st = (c.status or "").lower()
             self.container_state[c.id] = "running" if st == "running" else "exited"
+            if st != "running":
+                self.down_since[c.id] = now_utc()
         log(f"Seeded {len(self.container_state)} container states.")
 
     def _check_docker_ping(self):
         try:
             self.low_client.ping()
             if self.docker_up is False or self.docker_up is None:
-                # Transition to up
                 if self.docker_up is False:
                     self._notify_docker_state(True)
                 self.docker_up = True
         except Exception:
             if self.docker_up in (True, None):
-                # Transition to down
                 self._notify_docker_state(False)
                 self.docker_up = False
 
+    def _maybe_fire_down_after_grace(self, container):
+        cid = container.id
+        started = self.down_since.get(cid)
+        if started is None:
+            self.down_since[cid] = now_utc()
+            return
+        if cid in self.down_alerted:
+            return
+        if (now_utc() - started).total_seconds() >= DOWN_GRACE_SEC:
+            self._notify_down(container)
+
     def _handle_event(self, ev: dict):
-        # ev example fields: 'status', 'id', 'from', 'time', 'Actor', 'Type', 'Action'
         if ev.get("Type") != "container":
             return
 
@@ -230,56 +240,66 @@ class Notifier:
         try:
             container = self.client.containers.get(cid)
         except Exception:
-            # Container might be gone
             return
 
-        # Track restarts: "die" typically signals a restart when restart policy in play
+        # Loop detection
         if action in ("die", "oom", "kill", "stop"):
             self.restarts[cid].append(now_utc())
-            # Detect loop: N restarts within WINDOW
-            dq = self.restarts[cid]
             window_start = now_utc() - timedelta(seconds=RESTART_WINDOW_SEC)
-            recent = [t for t in dq if t >= window_start]
+            recent = [t for t in self.restarts[cid] if t >= window_start]
             if len(recent) >= RESTARTS_IN_WINDOW:
                 self._notify_loop(container, len(recent), RESTART_WINDOW_SEC)
 
-        # Track RUN state changes for down/up alerts
+        # State transitions
         st = (container.status or "").lower()
         prev = self.container_state.get(cid)
-
         current = "running" if st == "running" else "exited"
+
         if prev is None:
             self.container_state[cid] = current
+            if current == "exited":
+                self.down_since[cid] = now_utc()
             return
 
         if prev == "running" and current == "exited":
-            self._notify_down(container, ev)
-
-        if INCLUDE_RECOVERY and prev == "exited" and current == "running":
-            self._notify_up(container)
+            self._maybe_fire_down_after_grace(container)
+        elif prev == "exited" and current == "exited":
+            self._maybe_fire_down_after_grace(container)
+        elif prev == "exited" and current == "running":
+            if INCLUDE_RECOVERY:
+                self._notify_up(container)
+            else:
+                # Even if not notifying, clear all state on recovery
+                self._reset_backoff(cid)
+                self.down_since.pop(cid, None)
+                self.down_alerted.discard(cid)
+                self.loop_alerts_sent[cid] = 0
+                self.loop_alerts_suppressed.discard(cid)
 
         self.container_state[cid] = current
 
     def run(self):
-        # Seed initial states
         self._seed_states()
-
-        # Initial ping state
         self._check_docker_ping()
         last_ping = time.time()
 
         log("Listening for Docker events...")
         events = self.low_client.events(decode=True)
         while True:
-            # Maintain docker ping status periodically
             if time.time() - last_ping >= CHECK_PING_EVERY:
                 self._check_docker_ping()
                 last_ping = time.time()
+                # Periodic sweep for grace elapse
+                try:
+                    for c in self.client.containers.list(all=True):
+                        if (c.status or "").lower() != "running":
+                            self._maybe_fire_down_after_grace(c)
+                except Exception as e:
+                    log(f"Periodic sweep error: {e}")
 
             try:
                 ev = next(events)
             except StopIteration:
-                # Stream ended; try to reconnect
                 log("Event stream ended, reconnecting in 3s...")
                 time.sleep(3)
                 events = self.low_client.events(decode=True)
