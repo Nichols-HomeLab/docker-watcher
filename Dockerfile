@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # Needed to talk to Docker over /var/run/docker.sock
 RUN pip install --no-cache-dir docker pytz
