@@ -96,7 +96,7 @@ def container_display_name(container):
 class Notifier:
     def __init__(self):
         self.client = docker.from_env()
-        self.low_client = docker.APIClient(base_url=self.client.api.base_url)
+        self.low_client = self.client.api
 
         # Track last known running/exited state
         self.container_state = {}  # id -> "running"|"exited"|None
