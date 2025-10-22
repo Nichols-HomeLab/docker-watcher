@@ -1,15 +1,16 @@
 # docker-watcher
 
-A tiny Python app to monitor Docker for containers that go **down** or get stuck in a **restart loop**, then notify via **SMTP**.
+A tiny Python app to monitor Docker for containers that go **down** (with a configurable grace period) or get stuck in a **restart loop**, then notify via **SMTP**.
 
 ## What it does
 
 - Watches Docker events (`start`, `stop`, `die`, `oom`) through the Docker socket.
-- Sends **one** alert when a container transitions from `running` → `exited`.
-- Detects restart loops: **N restarts within T seconds** ⇒ sends a single "RESTART LOOP" alert.
+- Sends a single alert when a container has remained `exited` past the grace window (default 60s).
+- Detects restart loops: **N restarts within T seconds** ⇒ sends one "restart loop" alert.
 - Uses **exponential backoff** per container to mute repeated alerts if the container keeps flapping.
 - Optionally notifies when a container recovers (goes `exited` → `running`).
 - Also monitors the **Docker daemon** status and alerts when the daemon goes **down**/**up**.
+- Produces short, human-readable email subjects/bodies.
 
 ## Config (env vars)
 
@@ -22,13 +23,14 @@ A tiny Python app to monitor Docker for containers that go **down** or get stuck
 | `SMTP_TLS` | `0` | `1` to use STARTTLS |
 | `SMTP_USER` | *(empty)* | SMTP auth (optional) |
 | `SMTP_PASS` | *(empty)* | SMTP auth (optional) |
+| `SMTP_TIMEOUT` | `15` | SMTP socket timeout (seconds) |
 | `RESTARTS_IN_WINDOW` | `3` | Loop detection threshold |
 | `RESTART_WINDOW_SEC` | `60` | Loop detection window (seconds) |
 | `BACKOFF_BASE_SEC` | `60` | Mute duration on first alert |
 | `BACKOFF_MAX_SEC` | `3600` | Max mute duration |
 | `INCLUDE_RECOVERY` | `1` | Notify when container comes back up |
-| `INCLUDE_IMAGE` | `1` | Include image tag in container name |
-| `CHECK_PING_EVERY` | `10` | Seconds between Docker ping checks |
+| `CHECK_PING_EVERY` | `60` | Seconds between Docker ping checks |
+| `DOWN_GRACE_SEC` | `60` | Seconds a container must stay down before alerting |
 | `WATCHER_HOSTNAME` | *(container hostname)* | Display name in alerts |
 | `TZ` | `UTC` | Timezone for timestamps |
 
@@ -40,6 +42,19 @@ docker run -d --name docker-watcher \
   -e SMTP_HOST=mail -e SMTP_PORT=25 \
   -e SMTP_FROM=docker-watcher@yourdomain \
   -e SMTP_TO=alerts@yourdomain \
+  -e SMTP_TLS=1 \
+  -e SMTP_USER=mailer \
+  -e SMTP_PASS=secretpass \
+  -e SMTP_TIMEOUT=15 \
+  -e DOWN_GRACE_SEC=60 \
+  -e RESTARTS_IN_WINDOW=3 \
+  -e RESTART_WINDOW_SEC=60 \
+  -e BACKOFF_BASE_SEC=60 \
+  -e BACKOFF_MAX_SEC=3600 \
+  -e INCLUDE_RECOVERY=1 \
+  -e CHECK_PING_EVERY=60 \
+  -e WATCHER_HOSTNAME=$(hostname) \
+  -e TZ=UTC \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   docker-watcher
 ```
@@ -68,6 +83,20 @@ services:
       SMTP_HOST: "mail"
       SMTP_FROM: "docker-watcher@yourdomain"
       SMTP_TO: "alerts@yourdomain"
+      SMTP_PORT: "25"
+      SMTP_TLS: "1"
+      SMTP_USER: "mailer"
+      SMTP_PASS: "secretpass"
+      SMTP_TIMEOUT: "15"
+      DOWN_GRACE_SEC: "60"
+      RESTARTS_IN_WINDOW: "3"
+      RESTART_WINDOW_SEC: "60"
+      BACKOFF_BASE_SEC: "60"
+      BACKOFF_MAX_SEC: "3600"
+      INCLUDE_RECOVERY: "1"
+      CHECK_PING_EVERY: "60"
+      WATCHER_HOSTNAME: "$(hostname)"
+      TZ: "UTC"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 ```

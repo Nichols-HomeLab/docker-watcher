@@ -1,8 +1,8 @@
-name: Build image & create release (main)
+name: Build image & create release (main/dev)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
   workflow_dispatch:
 
 permissions:
@@ -12,10 +12,19 @@ permissions:
 env:
   REGISTRY: ghcr.io
 
-jobs:
-  build-and-release:
-    runs-on: ubuntu-latest
+concurrency:
+  group: docker-watcher-${{ github.ref }}
+  cancel-in-progress: false
 
+jobs:
+  # ---------- COMMON: compute repo + short sha ----------
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      IMAGE_REPO: ${{ steps.img.outputs.IMAGE_REPO }}
+      OWNER_LC: ${{ steps.img.outputs.OWNER_LC }}
+      NAME_LC: ${{ steps.img.outputs.NAME_LC }}
+      SHORT_SHA: ${{ steps.sha.outputs.SHORT_SHA }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -27,14 +36,41 @@ jobs:
           echo "NAME_LC=$(basename '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
           echo "IMAGE_REPO=${{ env.REGISTRY }}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/$(basename '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
-      - name: Set version
-        id: version
-        run: |
-          echo "VERSION=v0.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
-          echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+      - name: Short SHA
+        id: sha
+        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+  # ---------- DEV BRANCH: pre-release build ----------
+  dev-build:
+    needs: prep
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_REPO: ${{ needs.prep.outputs.IMAGE_REPO }}
+      SHORT_SHA: ${{ needs.prep.outputs.SHORT_SHA }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # required for tag detection
+
+      # Bump SemVer as a pre-release on dev (e.g., v1.4.0-dev.3)
+      - name: Bump version (pre-release)
+        id: bump
+        uses: anothrNick/github-tag-action@1.67.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WITH_V: true
+          DEFAULT_BUMP: patch
+          PRERELEASE: true
+          PRERELEASE_SUFFIX: dev
+          RELEASE_BRANCHES: main  # only main creates non-pre-release tags
+          DRY_RUN: false
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -43,17 +79,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
+      - name: Extract Docker metadata (dev)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.img.outputs.IMAGE_REPO }}
+          images: ${{ env.IMAGE_REPO }}
           tags: |
-            type=raw,value=latest
-            type=raw,value=${{ steps.version.outputs.SHORT_SHA }}
-            type=raw,value=${{ steps.version.outputs.VERSION }}
+            type=raw,value=dev
+            type=raw,value=dev-${{ env.SHORT_SHA }}
+            # dev semver tag like: dev-v1.4.0-dev.3
+            type=raw,value=dev-${{ steps.bump.outputs.new_tag }}
 
-      - name: Build & push
+      - name: Build & push (dev)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -64,20 +101,97 @@ jobs:
           cache-to: type=gha,mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          
-      - name: Create GitHub Release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Pre-release (dev)
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.VERSION }}
-          release_name: ${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ steps.bump.outputs.new_tag }}
+          name: ${{ steps.bump.outputs.new_tag }}
           body: |
-            Automated release for commit `${{ steps.version.outputs.SHORT_SHA }}`.
+            **Branch:** dev
+            **Commit:** `${{ env.SHORT_SHA }}`
 
             **Images:**
-            - `${{ steps.img.outputs.IMAGE_REPO }}:latest`
-            - `${{ steps.img.outputs.IMAGE_REPO }}:${{ steps.version.outputs.SHORT_SHA }}`
-            - `${{ steps.img.outputs.IMAGE_REPO }}:${{ steps.version.outputs.VERSION }}`
-          draft: false
+            - `${{ env.IMAGE_REPO }}:dev`
+            - `${{ env.IMAGE_REPO }}:dev-${{ env.SHORT_SHA }}`
+            - `${{ env.IMAGE_REPO }}:dev-${{ steps.bump.outputs.new_tag }}`
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------- MAIN BRANCH: stable build ----------
+  main-build:
+    needs: prep
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_REPO: ${{ needs.prep.outputs.IMAGE_REPO }}
+      SHORT_SHA: ${{ needs.prep.outputs.SHORT_SHA }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # required for tag detection
+
+      # Bump SemVer on main using Conventional Commits (creates vX.Y.Z)
+      - name: Bump version (stable)
+        id: bump
+        uses: anothrNick/github-tag-action@1.67.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WITH_V: true
+          DEFAULT_BUMP: patch
+          PRERELEASE: false
+          RELEASE_BRANCHES: main
+          DRY_RUN: false
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata (stable)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_REPO }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ env.SHORT_SHA }}
+            type=raw,value=${{ steps.bump.outputs.new_tag }}
+
+      - name: Build & push (stable)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Create GitHub Release (stable)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump.outputs.new_tag }}
+          name: ${{ steps.bump.outputs.new_tag }}
+          body: |
+            **Branch:** main
+            **Commit:** `${{ env.SHORT_SHA }}`
+
+            **Images:**
+            - `${{ env.IMAGE_REPO }}:latest`
+            - `${{ env.IMAGE_REPO }}:${{ env.SHORT_SHA }}`
+            - `${{ env.IMAGE_REPO }}:${{ steps.bump.outputs.new_tag }}`
           prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
