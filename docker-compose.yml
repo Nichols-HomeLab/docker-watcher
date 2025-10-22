@@ -1,6 +1,6 @@
 services:
   docker-watcher:
-    image: ghcr.io/nichols-homelab/docker-watcher:v0.0.2
+    image: ghcr.io/nichols-homelab/docker-watcher:v0.0.9
     container_name: docker-watcher
     restart: unless-stopped
     environment:
