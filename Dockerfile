@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.19
 FROM python:3.14-slim
+LABEL org.opencontainers.image.source=https://github.com/${OWNER}/${REPO}
 
 # Needed to talk to Docker over /var/run/docker.sock
 RUN pip install --no-cache-dir docker pytz
