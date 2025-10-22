@@ -1,24 +1,35 @@
 services:
   docker-watcher:
-    image: ghcr.io/nichols-homelab/docker-watcher:v0.0.2
+    image: ghcr.io/yourorg/docker-watcher:latest
     container_name: docker-watcher
     restart: unless-stopped
     environment:
-      SMTP_HOST: "mail"                # change to your SMTP relay
+      SMTP_HOST: "mail"
       SMTP_PORT: "25"
-      SMTP_FROM: "docker-watcher@yourdomain"
-      SMTP_TO: "ops@yourdomain"        # comma-separated for multiple
+      SMTP_FROM: "docker-watcher@localhost"
+      SMTP_TO: "ops@localhost"
       SMTP_TLS: "0"
       # SMTP_USER: ""
       # SMTP_PASS: ""
+      SMTP_TIMEOUT: "15"
+
       RESTARTS_IN_WINDOW: "3"
       RESTART_WINDOW_SEC: "60"
+
       BACKOFF_BASE_SEC: "60"
-      BACKOFF_MAX_SEC: "1800"
+      BACKOFF_MAX_SEC: "3600"
+
       INCLUDE_RECOVERY: "1"
-      CHECK_PING_EVERY: "10"
-      MAX_LOOP_ALERTS: "3"
-      WATCHER_HOSTNAME: "${HOSTNAME:-lab-host}"
+      CHECK_PING_EVERY: "60"
+      DOWN_GRACE_SEC: "60"
+
+      NOTIFY_WINDOW_SEC: "3600"
+      MAX_NOTIFIES_IN_WINDOW: "3"
+      RECOVERY_QUIET_SEC: "600"
+      SWEEP_ALL_EVERY_SEC: "10"
+      DOWN_RECHECK_SEC: "60"
+
       TZ: "America/New_York"
+      WATCHER_HOSTNAME: "external-node-01"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro

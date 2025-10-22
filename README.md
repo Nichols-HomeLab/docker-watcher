@@ -6,7 +6,7 @@ A tiny Python app to monitor Docker for containers that go **down** (with a conf
 
 - Watches Docker events (`start`, `stop`, `die`, `oom`) through the Docker socket.
 - Sends a single alert when a container has remained `exited` past the grace window (default 60s).
-- Detects restart loops: **N restarts within T seconds** ⇒ sends one "restart loop" alert.
+- Detects restart loops: **N restarts within T seconds** ⇒ sends a single alert and suppresses further loop alerts until the container recovers.
 - Uses **exponential backoff** per container to mute repeated alerts if the container keeps flapping.
 - Optionally notifies when a container recovers (goes `exited` → `running`).
 - Also monitors the **Docker daemon** status and alerts when the daemon goes **down**/**up**.
@@ -106,4 +106,5 @@ services:
 - Mount `/var/run/docker.sock` **read-only**.
 - If you're relaying to **ntfy** via SMTP, set your relay's host/port and recipient to the ntfy SMTP endpoint/alias your relay uses.
 - Backoff doubles each time a container triggers an alert, up to `BACKOFF_MAX_SEC`. Backoff resets when a container starts and runs healthily again.
+- Loop alerts fire at most once per down cycle; they resume only after the container runs again.
 - This app does not *stop* or *restart* containers; it only reports. 
