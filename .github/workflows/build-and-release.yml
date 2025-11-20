@@ -27,7 +27,7 @@ jobs:
       SHORT_SHA: ${{ steps.sha.outputs.SHORT_SHA }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Compute image repo (lowercase, org-pinned)
         id: img
@@ -50,7 +50,7 @@ jobs:
       SHORT_SHA: ${{ needs.prep.outputs.SHORT_SHA }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0  # required for tag detection
 
@@ -129,7 +129,7 @@ jobs:
       SHORT_SHA: ${{ needs.prep.outputs.SHORT_SHA }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0  # required for tag detection
 
