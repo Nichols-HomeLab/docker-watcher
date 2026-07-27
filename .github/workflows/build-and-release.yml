@@ -81,7 +81,7 @@ jobs:
 
       - name: Extract Docker metadata (dev)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_REPO }}
           tags: |
@@ -159,7 +159,7 @@ jobs:
 
       - name: Extract Docker metadata (stable)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_REPO }}
           tags: |
