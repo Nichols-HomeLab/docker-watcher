@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.19
+# syntax=docker/dockerfile:1.24
 FROM python:3.14-slim
 LABEL org.opencontainers.image.source=https://github.com/${OWNER}/${REPO}
 
