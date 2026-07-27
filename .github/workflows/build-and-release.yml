@@ -91,7 +91,7 @@ jobs:
             type=raw,value=dev-${{ steps.bump.outputs.new_tag }}
 
       - name: Build & push (dev)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -168,7 +168,7 @@ jobs:
             type=raw,value=${{ steps.bump.outputs.new_tag }}
 
       - name: Build & push (stable)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
